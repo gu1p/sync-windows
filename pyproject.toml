@@ -1,0 +1,14 @@
+[project]
+name = "sync-driver-proton-windows"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+classifiers = [
+    "Operating System :: Microsoft :: Windows",
+]
+dependencies = [
+    "pywin32>=311 ; platform_system == 'Windows'",
+    "textual>=6.8.0",
+    "typer>=0.20.0",
+]
