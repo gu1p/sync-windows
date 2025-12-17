@@ -176,7 +176,12 @@ class ProgressTracker:
                 self._dirs[rel] = _FolderState.from_json(payload)
 
     def _rel(self, path: str) -> str:
-        rel = os.path.relpath(pathlib.Path(path).resolve(), self._root)
+        target = self._root if not path else pathlib.Path(path).resolve()
+        try:
+            rel = os.path.relpath(target, self._root)
+        except ValueError:
+            # Different drives/mounts (Windows UNC vs local) — fall back to absolute.
+            return str(target)
         if rel == ".":
             return ""
         return rel
