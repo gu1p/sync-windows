@@ -10,6 +10,7 @@ import shutil
 import string
 import time
 import functools
+import os
 from enum import Enum
 from typing import Optional, Iterable, Any, Callable
 
@@ -24,6 +25,26 @@ def random_string(length: int) -> str:
 
 _MAX_NUMBER_NODES = 50_000
 _MAX_DIRECTORY_DEPTH = 1_000
+
+def _direntry_path(entry: os.DirEntry, parent_path: str) -> str:
+    """
+    Resolve a DirEntry to a usable path. Prefer the entry's own path when it
+    resolves under the expected parent; otherwise fall back to parent/name.
+    """
+    try:
+        candidate = entry.path
+    except Exception:
+        candidate = None
+
+    if candidate is not None:
+        try:
+            candidate_resolved = pathlib.Path(candidate).resolve()
+            if candidate_resolved.parent == pathlib.Path(parent_path).resolve():
+                return str(candidate_resolved)
+        except Exception:
+            candidate = None
+
+    return os.path.join(parent_path, entry.name)
 
 def _retry_permission_errors(attempts: int = 5, base_delay: float = 0.2):
     """Decorator to retry on PermissionError with backoff (e.g., Windows file locks)."""
@@ -43,6 +64,64 @@ def _retry_permission_errors(attempts: int = 5, base_delay: float = 0.2):
                 raise last_exc
         return wrapper
     return decorator
+
+def _skip_missing_folder(fn):
+    """Decorator to keep copying even if a folder vanishes or is inaccessible."""
+    @functools.wraps(fn)
+    def wrapper(self, folder: "Folder", dst_root: pathlib.Path, tracker: ProgressTracker, depth: int):
+        try:
+            return fn(self, folder, dst_root, tracker, depth)
+        except (FileNotFoundError, NotADirectoryError) as exc:
+            try:
+                folder_path = folder.path()
+            except Exception:
+                folder_path = "(unknown)"
+            self._emit(EventType.LOG, level="warning", message=f"Skipping missing/inaccessible folder {folder_path}: {exc}")
+            tracker.mark_dir_completed(folder_path)
+            return
+    return wrapper
+
+def _fs_path(path: str) -> str:
+    """Return a filesystem-safe path (adds Windows long-path prefix when needed)."""
+    if os.name != "nt":
+        return path
+    if path.startswith("\\\\?\\"):
+        return path
+    if path.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + path[2:]
+    return "\\\\?\\" + path
+
+def _strip_long_path_prefix(path: str) -> str:
+    """Remove Windows long-path prefix so relative paths can be computed."""
+    if os.name != "nt":
+        return path
+    unc_prefix = "\\\\?\\UNC\\"
+    if path.startswith(unc_prefix):
+        return "\\\\" + path[len(unc_prefix):]
+    standard_prefix = "\\\\?\\"
+    if path.startswith(standard_prefix):
+        return path[len(standard_prefix):]
+    return path
+
+def _safe_scandir(path: str):
+    """scandir that retries with long-path prefix on Windows and tolerates path-length errors."""
+    candidates = [path]
+    if os.name == "nt":
+        lp = _fs_path(path)
+        if lp != path:
+            candidates.append(lp)
+
+    last_exc = None
+    for candidate in candidates:
+        try:
+            yield from os.scandir(candidate)
+            return
+        except (FileNotFoundError, NotADirectoryError, PermissionError, OSError) as exc:
+            last_exc = exc
+            continue
+
+    if last_exc:
+        raise last_exc
 
 class NodeKind(Enum):
     FILE = "FILE"
@@ -367,6 +446,7 @@ class Tree:
         self._emit(EventType.PHASE, stage="finished", message="Migration complete")
         self._emit(EventType.FINISHED, message="Migration complete.")
 
+    @_skip_missing_folder
     def _copy_folder(self, folder: "Folder", dst_root: pathlib.Path, tracker: ProgressTracker, depth: int) -> None:
         if self._stop_flag:
             return
@@ -484,15 +564,24 @@ class Tree:
         except Exception:
             legacy_models = None
 
-        src_path = pathlib.Path(file_node.path()).resolve()
-        rel = src_path.relative_to(self._root_path)
+        src_path = pathlib.Path(file_node.path())
+        src_for_rel = pathlib.Path(_strip_long_path_prefix(str(src_path)))
+        root_for_rel = pathlib.Path(_strip_long_path_prefix(str(self._root_path)))
+        try:
+            rel = src_for_rel.relative_to(root_for_rel)
+        except ValueError:
+            rel = pathlib.Path(os.path.relpath(str(src_for_rel), str(root_for_rel)))
         if legacy_models:
             rel, _ = legacy_models.normalize_windows_path(rel)
         dst_path = dst_root / rel
         dst_path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = dst_path.with_name(dst_path.name + f".tmp.{random_string(8)}")
-        size = size_hint or src_path.stat().st_size
+        size = size_hint or pathlib.Path(_fs_path(str(src_path))).stat().st_size
         rel_key = rel.as_posix()
+
+        src_fs = pathlib.Path(_fs_path(str(src_path)))
+        dst_fs = pathlib.Path(_fs_path(str(dst_path)))
+        tmp_fs = pathlib.Path(_fs_path(str(tmp_path)))
 
         self._emit(EventType.COPY_START, rel=rel_key, size=size, src=str(src_path), dst=str(dst_path))
         bytes_done = 0
@@ -502,7 +591,7 @@ class Tree:
         min_progress_interval = 0.2
 
         try:
-            with src_path.open("rb") as f_src, tmp_path.open("wb") as f_dst:
+            with src_fs.open("rb") as f_src, tmp_fs.open("wb") as f_dst:
                 buffer = bytearray(1024 * 1024)
                 view = memoryview(buffer)
                 while True:
@@ -522,19 +611,19 @@ class Tree:
                         last_progress_time = now
 
             try:
-                shutil.copystat(src_path, tmp_path)
+                shutil.copystat(src_fs, tmp_fs)
             except OSError:
                 pass
 
-            tmp_path.replace(dst_path)
+            tmp_fs.replace(dst_fs)
             file_node.metadata().status = Status.DONE
             self.copied_bytes += size
             self.copied_files += 1
             self._emit(EventType.COPY_DONE, rel=rel_key, bytes_total=size)
         except Exception as exc:  # noqa: BLE001
             try:
-                if tmp_path.exists():
-                    tmp_path.unlink()
+                if tmp_fs.exists():
+                    tmp_fs.unlink()
             except Exception:
                 pass
             self._emit(EventType.LOG, level="error", message=f"Error copying {rel_key}: {exc!r}")
@@ -597,18 +686,19 @@ class Folder(Node):
     def iterate_children(self, known_prefixes: Optional[set[bytes]] = None) -> Iterable["Node"]:
         def _list_path():
             self._metadata = _Metadata(depth=self._metadata.depth)
-            for path in os.scandir(self._path):
+            for path in _safe_scandir(self._path):
                 if path.is_symlink():
                     continue
 
+                entry_path = _direntry_path(path, self._path)
                 if path.is_dir():
                     yield Folder(
-                        _path=os.path.join(self._path, path.name),
+                        _path=entry_path,
                         _parent=self._path,
                     )
                 else:
                     yield File(
-                        _path=os.path.join(self._path, path.name),
+                        _path=entry_path,
                         _size=path.stat().st_size,
                         _parent=self._path
                     )
