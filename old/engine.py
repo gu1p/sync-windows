@@ -6,6 +6,7 @@ import sys
 import traceback
 from pathlib import Path
 from typing import Optional, Union
+from datetime import datetime
 
 from old import models as migration_models
 from engine.models import Tree
@@ -76,12 +77,26 @@ class MigrationEngine:
         traceback.print_exception(type(exc), exc, exc.__traceback__, file=sys.stdout)
 
         tb_lines = traceback.format_exception(type(exc), exc, exc.__traceback__)
+        self._write_error_file(tb_lines)
         self._emit(EventType.LOG, level="error", message="Engine error encountered; shutting down.")
         for line in tb_lines:
             for segment in line.rstrip("\n").splitlines():
                 self._emit(EventType.LOG, level="error", message=segment)
         self._emit(EventType.PHASE, stage="error", message="Engine stopped due to an error")
         self._emit(EventType.FINISHED, message="Engine stopped due to an error.", error=True)
+
+    def _write_error_file(self, tb_lines: list[str]) -> None:
+        """Append stack trace to sync_errors.log for visibility in terminals that hide stdout."""
+        log_path = Path("sync_errors.log").resolve()
+        timestamp = datetime.now().isoformat(timespec="seconds")
+        try:
+            with log_path.open("a", encoding="utf-8") as f:
+                f.write(f"[{timestamp}] Engine error\n")
+                for line in tb_lines:
+                    f.write(line)
+                f.write("\n")
+        except Exception as log_exc:  # noqa: BLE001
+            print(f"Failed to write {log_path}: {log_exc}", file=sys.stdout)
 
     def stop(self) -> None:
         self._stop_flag = True
