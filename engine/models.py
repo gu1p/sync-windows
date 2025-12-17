@@ -9,6 +9,7 @@ import random
 import shutil
 import string
 import time
+import functools
 from enum import Enum
 from typing import Optional, Iterable, Any, Callable
 
@@ -23,6 +24,25 @@ def random_string(length: int) -> str:
 
 _MAX_NUMBER_NODES = 50_000
 _MAX_DIRECTORY_DEPTH = 1_000
+
+def _retry_permission_errors(attempts: int = 5, base_delay: float = 0.2):
+    """Decorator to retry on PermissionError with backoff (e.g., Windows file locks)."""
+    def decorator(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            last_exc: Optional[PermissionError] = None
+            for attempt in range(attempts):
+                try:
+                    return fn(*args, **kwargs)
+                except PermissionError as exc:
+                    last_exc = exc
+                    if attempt == attempts - 1:
+                        raise
+                    time.sleep(base_delay * (attempt + 1))
+            if last_exc:
+                raise last_exc
+        return wrapper
+    return decorator
 
 class NodeKind(Enum):
     FILE = "FILE"
@@ -201,6 +221,17 @@ class ProgressTracker:
         with tmp.open("w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=True, indent=2, sort_keys=True)
             f.write("\n")
+        try:
+            self._replace_state_file(tmp)
+        except PermissionError:
+            try:
+                tmp.unlink(missing_ok=True)  # cleanup best-effort
+            except Exception:
+                pass
+            print(f"Warning: could not persist tracker state to {self._state_file}", flush=True)
+
+    @_retry_permission_errors()
+    def _replace_state_file(self, tmp: pathlib.Path) -> None:
         tmp.replace(self._state_file)
 
     def _ensure_folder_entry(self, path: str) -> _FolderState:
