@@ -368,7 +368,33 @@ class Tree:
 
     def _copy_shard(self, shard: "Shard", dst_root: pathlib.Path, tracker: ProgressTracker, depth: int, copied_nodes: set[str]) -> None:
         parent_path = shard.parent()
-        self._emit(EventType.SHARD_START, prefix=shard._prefix.hex(), parent=parent_path or "")
+        shard_total = shard.size() if hasattr(shard, "size") else getattr(shard, "_size", 0) or 0
+        processed_in_shard = len(copied_nodes)
+
+        def emit_scan_status(remaining: int) -> None:
+            current_dir = parent_path or str(self._root_path)
+            try:
+                current_dir = os.path.relpath(current_dir, self._root_path)
+            except Exception:
+                pass
+            self._emit(
+                EventType.SCAN_STATUS,
+                current_dir=current_dir or ".",
+                scan_queue=0,
+                pending_files=max(remaining, 0),
+                pending_limit=shard_total or None,
+            )
+
+        remaining = max(shard_total - processed_in_shard, 0)
+        self._emit(
+            EventType.SHARD_START,
+            prefix=shard._prefix.hex(),
+            parent=parent_path or "",
+            total=shard_total,
+            remaining=remaining,
+        )
+        emit_scan_status(remaining)
+
         for node in shard.iterate_children():
             if self._stop_flag:
                 break
@@ -376,6 +402,8 @@ class Tree:
                 node: File
                 name = os.path.basename(node.path())
                 if name in copied_nodes:
+                    processed_in_shard += 1
+                    emit_scan_status(max(shard_total - processed_in_shard, 0))
                     continue
                 self.total_files += 1
                 try:
@@ -383,18 +411,33 @@ class Tree:
                     self.total_bytes += int(node_size)
                 except Exception:
                     node_size = 0
+                self._emit(EventType.SCAN_PROGRESS, files=self.total_files, bytes=self.total_bytes)
                 self._copy_file(node, dst_root, size_hint=node_size)
                 copied_nodes.add(name)
                 if parent_path:
                     tracker.record_copied_node(parent_path, name)
+                processed_in_shard += 1
+                emit_scan_status(max(shard_total - processed_in_shard, 0))
             elif node.kind() == NodeKind.FOLDER:
                 node: Folder
                 self._copy_folder(node, dst_root, tracker, depth=depth + 1)
+                processed_in_shard += 1
+                emit_scan_status(max(shard_total - processed_in_shard, 0))
             elif node.kind() == NodeKind.SHARD:
                 node: Shard
                 self._copy_shard(node, dst_root, tracker, depth=depth)
+                processed_in_shard += 1
+                emit_scan_status(max(shard_total - processed_in_shard, 0))
         shard.set_scan_status(Status.DONE)
-        self._emit(EventType.SHARD_DONE, prefix=shard._prefix.hex(), parent=parent_path or "")
+        remaining = max(shard_total - processed_in_shard, 0)
+        self._emit(
+            EventType.SHARD_DONE,
+            prefix=shard._prefix.hex(),
+            parent=parent_path or "",
+            total=shard_total,
+            remaining=remaining,
+        )
+        emit_scan_status(remaining)
 
     def _copy_file(self, file_node: File, dst_root: pathlib.Path, size_hint: int = 0) -> None:
         if self._stop_flag:
@@ -555,6 +598,7 @@ class Folder(Node):
                 _parent=self._path,
                 _prefix=shard.prefix,
                 _nodes=shard.__iter__(),
+                _size=shard.shard_nodes_count,
             )
 
     def parent(self) -> Optional[str]: return self._parent
@@ -573,6 +617,7 @@ class Shard(Node):
     _parent: Optional[str]
     _nodes: Iterable[Node]
     _prefix: bytes
+    _size: int = 0
     _path: str = dataclasses.field(init=False)
     _metadata: _Metadata = dataclasses.field(default_factory=_Metadata)
 
@@ -595,6 +640,9 @@ class Shard(Node):
 
     def kind(self) -> NodeKind:
         return NodeKind.SHARD
+
+    def size(self) -> int:
+        return self._size
 
     def iterate_children(self, known_prefixes: Optional[set[bytes]] = None) -> Iterable["Node"]:
         yield from self._nodes

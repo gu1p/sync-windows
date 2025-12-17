@@ -170,6 +170,10 @@ class MigrationApp(App[None]):
                 p.get("pending_files", 0),
                 p.get("pending_window_limit"),
             )
+        elif t == "shard_start":
+            self._handle_shard_event(p, done=False)
+        elif t == "shard_done":
+            self._handle_shard_event(p, done=True)
         elif t == "status":
             self.total_bytes = p.get("total_bytes", 0)
             self.copied_bytes = p.get("copied_bytes", 0)
@@ -241,12 +245,34 @@ class MigrationApp(App[None]):
         self, current_dir: str, scan_queue: int, pending_files: int, pending_limit: Optional[int] = None
     ) -> None:
         label = self.query_one("#scan_dir_label", Static)
+        safe_dir = current_dir or "(pending...)"
+        queue_val = scan_queue if isinstance(scan_queue, int) else 0
+        pending_val = pending_files if isinstance(pending_files, int) else 0
+        limit_val = pending_limit if isinstance(pending_limit, int) and pending_limit > 0 else None
         window_text = (
-            f"pending_window={pending_files}/{pending_limit}"
-            if pending_limit
-            else f"pending_window={pending_files}"
+            f"pending_window={pending_val}/{limit_val}"
+            if limit_val is not None
+            else f"pending_window={pending_val}"
         )
-        label.update(f"Scan dir: {current_dir} | scan_queue={scan_queue} | {window_text}")
+        label.update(f"Scan dir: {safe_dir} | scan_queue={queue_val} | {window_text}")
+
+    def _handle_shard_event(self, payload: dict, done: bool) -> None:
+        prefix = payload.get("prefix", "")
+        parent = payload.get("parent", "")
+        total = payload.get("total")
+        remaining = payload.get("remaining")
+        if remaining is None and isinstance(total, int):
+            copied = payload.get("copied")
+            if isinstance(copied, int):
+                remaining = max(total - copied, 0)
+        status_dir = parent or "."
+        state_label = "done" if done else "active"
+        self._update_scan_status(
+            f"{status_dir} | shard={prefix or '-'} | {state_label}",
+            scan_queue=0,
+            pending_files=remaining if isinstance(remaining, int) else 0,
+            pending_limit=total if isinstance(total, int) and total > 0 else None,
+        )
 
     def _update_overall_bars(self) -> None:
         copy_bar = self.query_one("#copy_overall", ProgressBar)

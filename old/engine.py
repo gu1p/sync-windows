@@ -63,6 +63,10 @@ class MigrationEngine:
         )
         try:
             tree.copy_to(dst=self.migration_root, progress_dir=None)
+        except Exception as exc:  # noqa: BLE001
+            self._emit(EventType.LOG, level="error", message=f"Engine error: {exc!r}")
+            self._emit(EventType.PHASE, stage="error", message="Engine stopped due to an error")
+            self._emit(EventType.FINISHED, message="Engine stopped due to an error.")
         finally:
             self.stop()
 
