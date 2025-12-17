@@ -189,6 +189,8 @@ class TreeCopyTests(unittest.TestCase):
         dst_root = tempfile.mkdtemp()
 
         files = ["f1.txt", "f2.txt", "f3.txt"]
+        for name in files:
+            pathlib.Path(src_root, name).write_text("data")
 
         class FakeDirEntry:
             def __init__(self, name: str, is_dir=False, is_symlink=False, size=1):
@@ -223,9 +225,15 @@ class TreeCopyTests(unittest.TestCase):
             copied.append((os.path.abspath(src), os.path.abspath(dst)))
 
         def fake_replace(self, target):
+            target_abs = os.path.abspath(target)
+            # Ignore internal progress tracker files.
+            if "state.json" in target_abs:
+                if pathlib.Path(self).exists():
+                    return orig_replace(self, target)
+                return pathlib.Path(target)
             if pathlib.Path(self).exists():
-                return orig_replace(self, target)
-            replaced.append(os.path.abspath(target))
+                orig_replace(self, target)
+            replaced.append(target_abs)
             return pathlib.Path(target)
 
         with mock.patch("os.scandir", fake_scandir), mock.patch("shutil.copy", fake_copy), mock.patch.object(pathlib.Path, "replace", fake_replace):
@@ -233,8 +241,9 @@ class TreeCopyTests(unittest.TestCase):
             tree.copy_to(dst=pathlib.Path(dst_root))
 
         expected_dsts = {os.path.realpath(os.path.join(dst_root, name)) for name in files}
-        self.assertEqual(set(map(os.path.realpath, replaced)), expected_dsts)
-        self.assertEqual(len(replaced), len(files))
+        replaced_filtered = {os.path.realpath(p) for p in replaced if "state.json" not in p}
+        self.assertEqual(replaced_filtered, expected_dsts)
+        self.assertEqual(len(replaced_filtered), len(files))
 
     def test_resume_skips_already_copied_shard_from_state(self):
         """
@@ -245,6 +254,8 @@ class TreeCopyTests(unittest.TestCase):
         dst_root = tempfile.mkdtemp()
         state_dir = pathlib.Path(tempfile.mkdtemp())
         files = ["f1.txt", "f2.txt", "f3.txt"]
+        for name in files:
+            pathlib.Path(src_root, name).write_text("data")
 
         class FakeDirEntry:
             def __init__(self, name: str, size: int = 1):
@@ -269,9 +280,10 @@ class TreeCopyTests(unittest.TestCase):
                 yield FakeDirEntry(name)
 
         copies_phase1: list[tuple[str, str]] = []
-        copies_phase2: list[tuple[str, str]] = []
+        replaced_phase1: list[str] = []
         replaced_phase2: list[str] = []
         orig_replace = pathlib.Path.replace
+        current_phase = {"name": "phase1"}
 
         original_cap = models._MAX_NUMBER_NODES
         original_hash = sharding.hash_fn
@@ -279,9 +291,15 @@ class TreeCopyTests(unittest.TestCase):
         sharding.hash_fn = lambda n: os.path.basename(n.path()).encode("utf-8")
 
         def fake_replace(self, target):
+            target_abs = os.path.abspath(target)
+            if "state.json" in target_abs:
+                if pathlib.Path(self).exists():
+                    return orig_replace(self, target)
+                return pathlib.Path(target)
+            dest_list = replaced_phase1 if current_phase["name"] == "phase1" else replaced_phase2
             if pathlib.Path(self).exists():
-                return orig_replace(self, target)
-            replaced_phase2.append(os.path.abspath(target))
+                orig_replace(self, target)
+            dest_list.append(target_abs)
             return pathlib.Path(target)
 
         try:
@@ -298,7 +316,7 @@ class TreeCopyTests(unittest.TestCase):
                 # simulate crash: do not process remaining shards or mark folder completed
 
             # Phase 2: resume; persisted prefix should prevent re-copy of first shard.
-            replaced_phase2.clear()
+            current_phase["name"] = "phase2"
             with mock.patch("os.scandir", fake_scandir), mock.patch("shutil.copy", lambda src, dst: copies_phase2.append((src, dst))), mock.patch.object(pathlib.Path, "replace", fake_replace):
                 tree.copy_to(dst=pathlib.Path(dst_root), progress_dir=state_dir)
         finally:
@@ -306,11 +324,9 @@ class TreeCopyTests(unittest.TestCase):
             sharding.hash_fn = original_hash
 
         # First shard copied once; remaining files copied on resume.
-        self.assertEqual(len(copies_phase1), 1)
+        self.assertEqual(len(replaced_phase1), 1)
         self.assertEqual(len(replaced_phase2), len(files) - 1)
-        phase1_files = {
-            os.path.basename(dst).split(".tmp.", 1)[0] for _, dst in copies_phase1
-        }
+        phase1_files = {os.path.basename(dst).split(".tmp.", 1)[0] for dst in replaced_phase1}
         phase2_files = {os.path.basename(dst) for dst in replaced_phase2}
         all_copied = set(phase2_files) | set(phase1_files)
         self.assertEqual(all_copied, set(files))
@@ -326,6 +342,8 @@ class TreeCopyTests(unittest.TestCase):
         dst_root = tempfile.mkdtemp()
         state_dir = pathlib.Path(tempfile.mkdtemp())
         files = ["a1.txt", "a2.txt", "b1.txt"]
+        for name in files:
+            pathlib.Path(src_root, name).write_text("data")
 
         class FakeDirEntry:
             def __init__(self, name: str, size: int = 1):
@@ -359,9 +377,14 @@ class TreeCopyTests(unittest.TestCase):
         sharding.hash_fn = lambda n: bytes([ord(os.path.basename(n.path())[0])])
 
         def fake_replace(self, target):
+            target_abs = os.path.abspath(target)
+            if "state.json" in target_abs:
+                if pathlib.Path(self).exists():
+                    return orig_replace(self, target)
+                return pathlib.Path(target)
             if pathlib.Path(self).exists():
-                return orig_replace(self, target)
-            replaced.append(os.path.abspath(target))
+                orig_replace(self, target)
+            replaced.append(target_abs)
             return pathlib.Path(target)
 
         try:
@@ -380,7 +403,7 @@ class TreeCopyTests(unittest.TestCase):
             models._MAX_NUMBER_NODES = original_cap
             sharding.hash_fn = original_hash
 
-        copied_basenames = {os.path.basename(dst) for dst in replaced}
+        copied_basenames = {os.path.basename(dst) for dst in replaced if "state.json" not in dst}
         self.assertEqual(copied_basenames, {"a2.txt", "b1.txt"})
 
     def test_deep_nested_tree_sharded_and_copied_completely(self):
@@ -439,8 +462,10 @@ class TreeCopyTests(unittest.TestCase):
         tree_entries: dict[str, list[FakeDirEntry]] = {}
         for rel, payload in structure.items():
             base = (src_root / rel).resolve()
+            base.mkdir(parents=True, exist_ok=True)
             entries: list[FakeDirEntry] = []
             for fname in payload["files"]:
+                (base / fname).write_text("data")
                 entries.append(FakeDirEntry(base, fname, is_dir=False))
             for dname in payload["dirs"]:
                 entries.append(FakeDirEntry(base, dname, is_dir=True))
@@ -458,9 +483,14 @@ class TreeCopyTests(unittest.TestCase):
         models._MAX_NUMBER_NODES = 3  # force multiple shards per folder
         orig_replace = pathlib.Path.replace
         def fake_replace(self, target):
+            target_abs = os.path.abspath(target)
+            if "state.json" in target_abs:
+                if pathlib.Path(self).exists():
+                    return orig_replace(self, target)
+                return pathlib.Path(target)
             if pathlib.Path(self).exists():
-                return orig_replace(self, target)
-            replaced.append(os.path.abspath(target))
+                orig_replace(self, target)
+            replaced.append(target_abs)
             return pathlib.Path(target)
         try:
             with mock.patch("os.scandir", fake_scandir), mock.patch("shutil.copy", lambda src, dst: copies.append((src, dst))), mock.patch.object(pathlib.Path, "replace", fake_replace):
@@ -477,6 +507,8 @@ class TreeCopyTests(unittest.TestCase):
 
         copied_rel = []
         for dst in replaced:
+            if "state.json" in dst:
+                continue
             rel = pathlib.Path(dst).resolve().relative_to(dst_root.resolve())
             copied_rel.append(str(rel))
 
@@ -514,11 +546,15 @@ class TreeCopyTests(unittest.TestCase):
         tree_entries: dict[str, list[FakeDirEntry]] = {}
         # Build a chain: root -> level0 -> level1 -> ... -> leaf (file)
         current = src_root.resolve()
+        current.mkdir(parents=True, exist_ok=True)
         for i, name in enumerate(chain):
             next_path = current / name
+            next_path.mkdir(parents=True, exist_ok=True)
             tree_entries[str(current)] = [FakeDirEntry(current, name, is_dir=True)]
             current = next_path.resolve()
         # leaf directory contains a file to stop traversal if depth were allowed
+        (current / "leaf.txt").parent.mkdir(parents=True, exist_ok=True)
+        (current / "leaf.txt").write_text("data")
         tree_entries[str(current)] = [FakeDirEntry(current, "leaf.txt", is_dir=False)]
 
         def fake_scandir(path):

@@ -72,8 +72,8 @@ class MigrationEngine:
 
     def _emit_engine_exception(self, exc: BaseException) -> None:
         """Log a fatal error with stack trace to the UI and stderr, then signal finish."""
-        # Print to stderr so the traceback is visible after the TUI exits.
-        traceback.print_exception(type(exc), exc, exc.__traceback__, file=sys.stderr)
+        # Print to stdout so the traceback is visible after the TUI exits.
+        traceback.print_exception(type(exc), exc, exc.__traceback__, file=sys.stdout)
 
         tb_lines = traceback.format_exception(type(exc), exc, exc.__traceback__)
         self._emit(EventType.LOG, level="error", message="Engine error encountered; shutting down.")
