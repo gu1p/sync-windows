@@ -238,7 +238,7 @@ class TreeCopyTests(unittest.TestCase):
 
         with mock.patch("os.scandir", fake_scandir), mock.patch("shutil.copy", fake_copy), mock.patch.object(pathlib.Path, "replace", fake_replace):
             tree = models.Tree(pathlib.Path(src_root))
-            tree.copy_to(dst=pathlib.Path(dst_root))
+            tree.copy_to(dst=pathlib.Path(dst_root), progress_dir=pathlib.Path(tempfile.mkdtemp()))
 
         expected_dsts = {os.path.realpath(os.path.join(dst_root, name)) for name in files}
         replaced_filtered = {os.path.realpath(p) for p in replaced if "state.json" not in p}
@@ -495,7 +495,7 @@ class TreeCopyTests(unittest.TestCase):
         try:
             with mock.patch("os.scandir", fake_scandir), mock.patch("shutil.copy", lambda src, dst: copies.append((src, dst))), mock.patch.object(pathlib.Path, "replace", fake_replace):
                 tree = models.Tree(src_root)
-                tree.copy_to(dst_root)
+                tree.copy_to(dst_root, progress_dir=pathlib.Path(tempfile.mkdtemp()))
         finally:
             models._MAX_NUMBER_NODES = original_cap
 
@@ -568,7 +568,7 @@ class TreeCopyTests(unittest.TestCase):
             with mock.patch("os.scandir", fake_scandir), mock.patch("shutil.copy", lambda src, dst: None):
                 tree = models.Tree(src_root)
                 with self.assertRaises(RecursionError):
-                    tree.copy_to(dst_root)
+                    tree.copy_to(dst_root, progress_dir=pathlib.Path(tempfile.mkdtemp()))
         finally:
             models._MAX_DIRECTORY_DEPTH = original_depth
 

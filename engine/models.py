@@ -139,7 +139,8 @@ class ProgressTracker:
     def __init__(self, root: pathlib.Path, dst: pathlib.Path, state_dir: Optional[pathlib.Path] = None):
         self._root = root.resolve()
         self._dst = dst.resolve()
-        self._state_dir = state_dir.resolve() if state_dir else self._root / ".sync_state"
+        default_state_dir = state_dir if state_dir is not None else pathlib.Path.cwd() / ".sync_state"
+        self._state_dir = default_state_dir.resolve()
         self._state_dir.mkdir(parents=True, exist_ok=True)
         self._state_file = self._state_dir / "state.json"
         self._state_version = 2
