@@ -26,7 +26,6 @@ from typing import Iterable
 import typer
 
 from old.config_factory import DerivationDetails, derive_migration_config
-from old import load_harness
 from old.engine import MigrationEngine
 from old import models as migration_models
 from old.ui import MigrationApp
@@ -35,7 +34,6 @@ from old.ui import MigrationApp
 cli = typer.Typer(
     help="External-drive to cloud sync migration with a minimal CLI; advanced overrides via SYNC_MIGRATION_OVERRIDES."
 )
-cli.add_typer(load_harness.app, name="bench", help="Synthetic load/perf harness.")
 
 
 @cli.command()
