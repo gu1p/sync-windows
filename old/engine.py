@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import queue
 import threading
+import sys
+import traceback
 from pathlib import Path
 from typing import Optional, Union
 
@@ -64,11 +66,22 @@ class MigrationEngine:
         try:
             tree.copy_to(dst=self.migration_root, progress_dir=None)
         except Exception as exc:  # noqa: BLE001
-            self._emit(EventType.LOG, level="error", message=f"Engine error: {exc!r}")
-            self._emit(EventType.PHASE, stage="error", message="Engine stopped due to an error")
-            self._emit(EventType.FINISHED, message="Engine stopped due to an error.")
+            self._emit_engine_exception(exc)
         finally:
             self.stop()
+
+    def _emit_engine_exception(self, exc: BaseException) -> None:
+        """Log a fatal error with stack trace to the UI and stderr, then signal finish."""
+        # Print to stderr so the traceback is visible after the TUI exits.
+        traceback.print_exception(type(exc), exc, exc.__traceback__, file=sys.stderr)
+
+        tb_lines = traceback.format_exception(type(exc), exc, exc.__traceback__)
+        self._emit(EventType.LOG, level="error", message="Engine error encountered; shutting down.")
+        for line in tb_lines:
+            for segment in line.rstrip("\n").splitlines():
+                self._emit(EventType.LOG, level="error", message=segment)
+        self._emit(EventType.PHASE, stage="error", message="Engine stopped due to an error")
+        self._emit(EventType.FINISHED, message="Engine stopped due to an error.", error=True)
 
     def stop(self) -> None:
         self._stop_flag = True

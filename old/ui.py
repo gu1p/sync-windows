@@ -213,9 +213,12 @@ class MigrationApp(App[None]):
             self._update_freed_labels()
         elif t == "finished":
             msg = p.get("message", "Finished.")
-            self._log_line(msg, "success")
+            is_error = bool(p.get("error"))
+            self._log_line(msg, "error" if is_error else "success")
             self._update_overall_bars()
             self._update_local_usage()
+            if is_error:
+                self.exit()
 
     # ------------------ UI helpers ------------------
 
