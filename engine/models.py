@@ -125,6 +125,24 @@ def _path_variants(path: str) -> list[pathlib.Path]:
         return [plain]
     return [plain, long_variant]
 
+def _tmp_candidates(dst_path: pathlib.Path) -> list[pathlib.Path]:
+    """
+    Generate short temp path candidates near the destination to avoid exceeding
+    provider path-length limits (e.g., cloud sync virtual drives).
+    """
+    suffixes = [".tmp", ".t", "~", f".{random_string(2)}"]
+    candidates: list[pathlib.Path] = []
+    seen: set[str] = set()
+    for suffix in suffixes:
+        tmp = dst_path.with_name(dst_path.name + suffix)
+        for variant in _path_variants(str(tmp)):
+            key = str(variant)
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append(pathlib.Path(variant))
+    return candidates
+
 class NodeKind(Enum):
     FILE = "FILE"
     FOLDER = "FOLDER"
@@ -577,7 +595,6 @@ class Tree:
             rel, _ = legacy_models.normalize_windows_path(rel)
         dst_path = dst_root / rel
         dst_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = dst_path.with_name(dst_path.name + f".tmp.{random_string(8)}")
         size = size_hint or 0
         if size == 0:
             size_exc: Optional[Exception] = None
@@ -595,7 +612,7 @@ class Tree:
 
         src_variants = _path_variants(str(src_path))
         dst_variants = _path_variants(str(dst_path))
-        tmp_variants = _path_variants(str(tmp_path))
+        tmp_variants = _tmp_candidates(dst_path)
 
         self._emit(EventType.COPY_START, rel=rel_key, size=size, src=str(src_path), dst=str(dst_path))
         progress_step = max(size // 10, 1)  # coarse progress; fine-grained left to old layer if needed
