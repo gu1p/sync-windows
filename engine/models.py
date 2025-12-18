@@ -650,7 +650,9 @@ class File(Node):
 
     def copy(self, dst: pathlib.Path):
         dst.mkdir(exist_ok=True, parents=True)
-        shutil.copy(self._path, dst)
+        src_fs = pathlib.Path(_fs_path(str(self._path)))
+        dst_fs = pathlib.Path(_fs_path(str(dst)))
+        shutil.copy(src_fs, dst_fs)
         self._metadata.status = Status.DONE
 
     def metadata(self) -> Optional[_Metadata]:
