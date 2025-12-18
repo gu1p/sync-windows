@@ -602,38 +602,50 @@ class Tree:
         min_progress_interval = 0.2
 
         def _copy_once(src_fs: pathlib.Path, dst_fs: pathlib.Path, tmp_fs: pathlib.Path) -> None:
-            bytes_done = 0
-            last_progress_emit = 0
-            last_progress_time = time.time()
-
-            dst_fs.parent.mkdir(parents=True, exist_ok=True)
-            tmp_fs.parent.mkdir(parents=True, exist_ok=True)
-
-            with src_fs.open("rb") as f_src, tmp_fs.open("wb") as f_dst:
-                buffer = bytearray(1024 * 1024)
-                view = memoryview(buffer)
-                while True:
-                    read = f_src.readinto(buffer)
-                    if not read:
-                        break
-                    f_dst.write(view[:read])
-                    bytes_done += read
-                    now = time.time()
-                    if (
-                        bytes_done == size
-                        or bytes_done - last_progress_emit >= progress_step
-                        or (now - last_progress_time) >= min_progress_interval
-                    ):
-                        self._emit(EventType.COPY_PROGRESS, rel=rel_key, bytes_done=bytes_done, bytes_total=size)
-                        last_progress_emit = bytes_done
-                        last_progress_time = now
-
+            failure_stage = "open_src"
             try:
-                shutil.copystat(src_fs, tmp_fs)
-            except OSError:
-                pass
+                dst_fs.parent.mkdir(parents=True, exist_ok=True)
+                tmp_fs.parent.mkdir(parents=True, exist_ok=True)
 
-            tmp_fs.replace(dst_fs)
+                with src_fs.open("rb") as f_src:
+                    failure_stage = "open_tmp"
+                    with tmp_fs.open("wb") as f_dst:
+                        failure_stage = "copy"
+                        buffer = bytearray(1024 * 1024)
+                        view = memoryview(buffer)
+                        bytes_done = 0
+                        last_progress_emit = 0
+                        last_progress_time = time.time()
+                        while True:
+                            read = f_src.readinto(buffer)
+                            if not read:
+                                break
+                            f_dst.write(view[:read])
+                            bytes_done += read
+                            now = time.time()
+                            if (
+                                bytes_done == size
+                                or bytes_done - last_progress_emit >= progress_step
+                                or (now - last_progress_time) >= min_progress_interval
+                            ):
+                                self._emit(EventType.COPY_PROGRESS, rel=rel_key, bytes_done=bytes_done, bytes_total=size)
+                                last_progress_emit = bytes_done
+                                last_progress_time = now
+
+                failure_stage = "copystat"
+                try:
+                    shutil.copystat(src_fs, tmp_fs)
+                except OSError:
+                    pass
+
+                failure_stage = "replace"
+                tmp_fs.replace(dst_fs)
+            except Exception as exc:  # noqa: BLE001
+                try:
+                    setattr(exc, "_copy_stage", failure_stage)
+                except Exception:
+                    pass
+                raise
 
         last_attempt: Optional[tuple[pathlib.Path, pathlib.Path, pathlib.Path]] = None
         last_exc: Optional[Exception] = None
@@ -660,7 +672,12 @@ class Tree:
             details = ""
             if last_attempt:
                 details = f" (src={last_attempt[0]}, dst={last_attempt[1]}, tmp={last_attempt[2]})"
-            self._emit(EventType.LOG, level="error", message=f"Error copying {rel_key}: {last_exc!r}{details}")
+            stage = getattr(last_exc, "_copy_stage", "unknown")
+            self._emit(
+                EventType.LOG,
+                level="error",
+                message=f"Error copying {rel_key}: {last_exc!r}{details} [stage={stage}]",
+            )
 
 
 # avoid allocating new objects
