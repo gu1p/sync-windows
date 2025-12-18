@@ -664,6 +664,47 @@ class Tree:
                     pass
                 raise
 
+        def _copy_direct(src_fs: pathlib.Path, dst_fs: pathlib.Path) -> None:
+            failure_stage = "direct_open_src"
+            try:
+                dst_fs.parent.mkdir(parents=True, exist_ok=True)
+                with src_fs.open("rb") as f_src:
+                    failure_stage = "direct_open_dst"
+                    with dst_fs.open("wb") as f_dst:
+                        failure_stage = "direct_copy"
+                        buffer = bytearray(1024 * 1024)
+                        view = memoryview(buffer)
+                        bytes_done = 0
+                        last_progress_emit = 0
+                        last_progress_time = time.time()
+                        while True:
+                            read = f_src.readinto(buffer)
+                            if not read:
+                                break
+                            f_dst.write(view[:read])
+                            bytes_done += read
+                            now = time.time()
+                            if (
+                                bytes_done == size
+                                or bytes_done - last_progress_emit >= progress_step
+                                or (now - last_progress_time) >= min_progress_interval
+                            ):
+                                self._emit(EventType.COPY_PROGRESS, rel=rel_key, bytes_done=bytes_done, bytes_total=size)
+                                last_progress_emit = bytes_done
+                                last_progress_time = now
+
+                failure_stage = "direct_copystat"
+                try:
+                    shutil.copystat(src_fs, dst_fs)
+                except OSError:
+                    pass
+            except Exception as exc:  # noqa: BLE001
+                try:
+                    setattr(exc, "_copy_stage", failure_stage)
+                except Exception:
+                    pass
+                raise
+
         last_attempt: Optional[tuple[pathlib.Path, pathlib.Path, pathlib.Path]] = None
         last_exc: Optional[Exception] = None
         for src_fs in src_variants:
@@ -684,6 +725,21 @@ class Tree:
                                 tmp_fs.unlink()
                         except Exception:
                             pass
+
+        # Fallback: try direct write without a temp file.
+        if last_exc:
+            for src_fs in src_variants:
+                for dst_fs in dst_variants:
+                    try:
+                        _copy_direct(src_fs, dst_fs)
+                        file_node.metadata().status = Status.DONE
+                        self.copied_bytes += size
+                        self.copied_files += 1
+                        self._emit(EventType.COPY_DONE, rel=rel_key, bytes_total=size)
+                        return
+                    except Exception as exc:  # noqa: BLE001
+                        last_attempt = (src_fs, dst_fs, dst_fs)
+                        last_exc = exc
 
         if last_exc:
             details = ""
