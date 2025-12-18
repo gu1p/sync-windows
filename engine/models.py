@@ -70,6 +70,9 @@ def _fs_path(path: str) -> str:
     """Return a filesystem-safe path (adds Windows long-path prefix when needed)."""
     if os.name != "nt":
         return path
+    # Some virtual shares (e.g., VMware shared folders) reject long-path prefixes.
+    if path.startswith("\\\\vmware-host\\"):
+        return path
     if path.startswith("\\\\?\\"):
         return path
     if path.startswith("\\\\"):
