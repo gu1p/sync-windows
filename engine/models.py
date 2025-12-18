@@ -26,25 +26,6 @@ def random_string(length: int) -> str:
 _MAX_NUMBER_NODES = 50_000
 _MAX_DIRECTORY_DEPTH = 1_000
 
-def _direntry_path(entry: os.DirEntry, parent_path: str) -> str:
-    """
-    Resolve a DirEntry to a usable path. Prefer the entry's own path when it
-    resolves under the expected parent; otherwise fall back to parent/name.
-    """
-    try:
-        candidate = entry.path
-    except Exception:
-        candidate = None
-
-    if candidate is not None:
-        try:
-            candidate_resolved = pathlib.Path(candidate).resolve()
-            if candidate_resolved.parent == pathlib.Path(parent_path).resolve():
-                return str(candidate_resolved)
-        except Exception:
-            candidate = None
-
-    return os.path.join(parent_path, entry.name)
 
 def _retry_permission_errors(attempts: int = 5, base_delay: float = 0.2):
     """Decorator to retry on PermissionError with backoff (e.g., Windows file locks)."""
@@ -62,6 +43,8 @@ def _retry_permission_errors(attempts: int = 5, base_delay: float = 0.2):
                     time.sleep(base_delay * (attempt + 1))
             if last_exc:
                 raise last_exc
+            return None
+
         return wrapper
     return decorator
 
@@ -74,11 +57,13 @@ def _skip_missing_folder(fn):
         except (FileNotFoundError, NotADirectoryError) as exc:
             try:
                 folder_path = folder.path()
-            except Exception:
+            except Exception as e:
                 folder_path = "(unknown)"
+
+
             self._emit(EventType.LOG, level="warning", message=f"Skipping missing/inaccessible folder {folder_path}: {exc}")
             tracker.mark_dir_completed(folder_path)
-            return
+            return None
     return wrapper
 
 def _fs_path(path: str) -> str:
@@ -690,7 +675,8 @@ class Folder(Node):
                 if path.is_symlink():
                     continue
 
-                entry_path = _direntry_path(path, self._path)
+
+                entry_path = os.path.join(self._path, path.name)
                 if path.is_dir():
                     yield Folder(
                         _path=entry_path,
