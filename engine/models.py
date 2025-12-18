@@ -569,13 +569,14 @@ class Tree:
         tmp_fs = pathlib.Path(_fs_path(str(tmp_path)))
 
         self._emit(EventType.COPY_START, rel=rel_key, size=size, src=str(src_path), dst=str(dst_path))
-        bytes_done = 0
-        last_progress_emit = 0
-        last_progress_time = time.time()
         progress_step = max(size // 10, 1)  # coarse progress; fine-grained left to old layer if needed
         min_progress_interval = 0.2
 
         try:
+            bytes_done = 0
+            last_progress_emit = 0
+            last_progress_time = time.time()
+
             with src_fs.open("rb") as f_src, tmp_fs.open("wb") as f_dst:
                 buffer = bytearray(1024 * 1024)
                 view = memoryview(buffer)
@@ -611,7 +612,11 @@ class Tree:
                     tmp_fs.unlink()
             except Exception:
                 pass
-            self._emit(EventType.LOG, level="error", message=f"Error copying {rel_key}: {exc!r}")
+            self._emit(
+                EventType.LOG,
+                level="error",
+                message=f"Error copying {rel_key}: {exc!r} (src={src_fs}, dst={dst_fs}, tmp={tmp_fs})",
+            )
 
 
 # avoid allocating new objects
