@@ -40,16 +40,16 @@ cli = typer.Typer(
 def run(
     origin: Path = typer.Argument(
         ...,
-        exists=True,
-        file_okay=False,
+        exists=False,  # custom validation inside to avoid Click misclassifying UNC paths
+        file_okay=True,
         dir_okay=True,
         readable=True,
         help="Root folder on the external HD.",
     ),
     dst: Path = typer.Argument(
         ...,
-        exists=True,
-        file_okay=False,
+        exists=False,
+        file_okay=True,
         dir_okay=True,
         readable=True,
         help="Root folder of the cloud provider's sync folder.",
@@ -84,6 +84,17 @@ def run(
       - free already-migrated files when needed
       - resume based on inventory SQLite DB
     """
+
+    def _require_dir(path: Path, name: str) -> Path:
+        p = Path(path)
+        if not p.exists():
+            raise typer.BadParameter(f"{name} does not exist: {p}", param_hint=name)
+        if not p.is_dir():
+            raise typer.BadParameter(f"{name} is not a directory: {p}", param_hint=name)
+        return p.resolve()
+
+    origin = _require_dir(origin, "ORIGIN")
+    dst = _require_dir(dst, "DST")
 
     config, details = derive_migration_config(
         source_root=origin,
