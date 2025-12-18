@@ -25,6 +25,31 @@ def random_string(length: int) -> str:
 
 _MAX_NUMBER_NODES = 50_000
 _MAX_DIRECTORY_DEPTH = 1_000
+_WINDOWS_INVALID_CHARS = set('<>:"/\\|?*')
+_WINDOWS_RESERVED_NAMES = {
+    "con",
+    "prn",
+    "aux",
+    "nul",
+    "com1",
+    "com2",
+    "com3",
+    "com4",
+    "com5",
+    "com6",
+    "com7",
+    "com8",
+    "com9",
+    "lpt1",
+    "lpt2",
+    "lpt3",
+    "lpt4",
+    "lpt5",
+    "lpt6",
+    "lpt7",
+    "lpt8",
+    "lpt9",
+}
 
 
 def _retry_permission_errors(attempts: int = 5, base_delay: float = 0.2):
@@ -90,6 +115,22 @@ def _strip_long_path_prefix(path: str) -> str:
     if path.startswith(standard_prefix):
         return path[len(standard_prefix):]
     return path
+
+
+def _is_windows_invalid_name(name: str) -> tuple[bool, str]:
+    """Return True/reason if a path component is invalid on Windows."""
+    if os.name != "nt":
+        return False, ""
+    if any(ord(ch) < 32 for ch in name):
+        return True, "contains control characters"
+    if any(ch in _WINDOWS_INVALID_CHARS for ch in name):
+        return True, "contains invalid characters <>:\"/\\|?*"
+    if name.rstrip(" .") != name:
+        return True, "has trailing spaces or dots"
+    base = name.split(".")[0]
+    if base.lower() in _WINDOWS_RESERVED_NAMES:
+        return True, "is a reserved device name"
+    return False, ""
 
 def _safe_scandir(path: str):
     """scandir that retries with long-path prefix on Windows and tolerates path-length errors."""
@@ -483,22 +524,55 @@ class Tree:
         if active:
             active_prefix, copied_nodes = active
 
-        for shard in folder.iterate_children(known_prefixes=tracker.ignored_prefixes(folder_path)):
-            if self._stop_flag:
-                break
+        def _log_invalid_entry(entry_path: str, reason: str) -> None:
+            safe_path = entry_path.replace("\n", "\\n").replace("\r", "\\r")
+            rel = safe_path
+            try:
+                rel = os.path.relpath(entry_path, self._root_path)
+            except Exception:
+                pass
+            self._emit(
+                EventType.LOG,
+                level="error",
+                message=f"Skipping entry with Windows-invalid name: {rel} ({reason})",
+            )
 
-            if active_prefix is not None and shard._prefix != active_prefix:
-                continue
+        def _log_scandir_error(path_str: str, exc: BaseException) -> None:
+            safe_path = path_str.replace("\n", "\\n").replace("\r", "\\r")
+            self._emit(
+                EventType.LOG,
+                level="error",
+                message=f"Skipping folder due to scandir error: {safe_path} ({exc!r})",
+            )
+            try:
+                tracker.mark_dir_completed(path_str)
+            except Exception:
+                pass
 
-            if active_prefix is None:
-                tracker.start_active_shard(folder_path, shard._prefix)
-                active_prefix = shard._prefix
+        try:
+            shard_iter = folder.iterate_children(
+                known_prefixes=tracker.ignored_prefixes(folder_path),
+                on_invalid_entry=_log_invalid_entry,
+                on_error=_log_scandir_error,
+            )
+            for shard in shard_iter:
+                if self._stop_flag:
+                    break
+
+                if active_prefix is not None and shard._prefix != active_prefix:
+                    continue
+
+                if active_prefix is None:
+                    tracker.start_active_shard(folder_path, shard._prefix)
+                    active_prefix = shard._prefix
+                    copied_nodes = set()
+
+                self._copy_shard(shard, dst_root, tracker, depth=depth, copied_nodes=copied_nodes)
+                tracker.finish_active_shard(folder_path, shard._prefix)
+                active_prefix = None
                 copied_nodes = set()
-
-            self._copy_shard(shard, dst_root, tracker, depth=depth, copied_nodes=copied_nodes)
-            tracker.finish_active_shard(folder_path, shard._prefix)
-            active_prefix = None
-            copied_nodes = set()
+        except OSError as exc:
+            _log_scandir_error(folder_path, exc)
 
         if active_prefix is None and not self._stop_flag:
             tracker.mark_dir_completed(folder_path)
@@ -819,26 +893,48 @@ class Folder(Node):
     def kind(self) -> NodeKind:
         return NodeKind.FOLDER
 
-    def iterate_children(self, known_prefixes: Optional[set[bytes]] = None) -> Iterable["Node"]:
+    def iterate_children(
+        self,
+        known_prefixes: Optional[set[bytes]] = None,
+        on_invalid_entry: Optional[Callable[[str, str], None]] = None,
+        on_error: Optional[Callable[[str, BaseException], None]] = None,
+    ) -> Iterable["Node"]:
         def _list_path():
             self._metadata = _Metadata(depth=self._metadata.depth)
-            for path in _safe_scandir(self._path):
-                if path.is_symlink():
-                    continue
+            try:
+                for path in _safe_scandir(self._path):
+                    name = path.name
+                    if on_invalid_entry:
+                        invalid, reason = _is_windows_invalid_name(name)
+                        if invalid:
+                            entry_path = os.path.join(self._path, name)
+                            try:
+                                on_invalid_entry(entry_path, reason)
+                            except Exception:
+                                pass
+                            continue
+                    if path.is_symlink():
+                        continue
 
-
-                entry_path = os.path.join(self._path, path.name)
-                if path.is_dir():
-                    yield Folder(
-                        _path=entry_path,
-                        _parent=self._path,
-                    )
-                else:
-                    yield File(
-                        _path=entry_path,
-                        _size=path.stat().st_size,
-                        _parent=self._path
-                    )
+                    entry_path = os.path.join(self._path, name)
+                    if path.is_dir():
+                        yield Folder(
+                            _path=entry_path,
+                            _parent=self._path,
+                        )
+                    else:
+                        yield File(
+                            _path=entry_path,
+                            _size=path.stat().st_size,
+                            _parent=self._path
+                        )
+            except OSError as exc:
+                if on_error:
+                    try:
+                        on_error(self._path, exc)
+                    except Exception:
+                        pass
+                return
         seen_prefixes = set(known_prefixes or ())
         keep_scanning = True
         while keep_scanning:

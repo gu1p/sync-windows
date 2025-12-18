@@ -98,6 +98,17 @@ class MigrationEngine:
         except Exception as log_exc:  # noqa: BLE001
             print(f"Failed to write {log_path}: {log_exc}", file=sys.stdout)
 
+    def _append_error_log(self, level: str, message: str) -> None:
+        """Append non-fatal errors (e.g., skipped files) to sync_errors.log."""
+        log_path = Path("sync_errors.log").resolve()
+        timestamp = datetime.now().isoformat(timespec="seconds")
+        safe = message.replace("\n", "\\n").replace("\r", "\\r")
+        try:
+            with log_path.open("a", encoding="utf-8") as f:
+                f.write(f"[{timestamp}] {level.upper()}: {safe}\n")
+        except Exception as log_exc:  # noqa: BLE001
+            print(f"Failed to write {log_path}: {log_exc}", file=sys.stdout)
+
     def stop(self) -> None:
         self._stop_flag = True
         self._stop_online_only_worker(wait=True)
@@ -107,6 +118,12 @@ class MigrationEngine:
     def _handle_event_from_tree(self, type_: Union[EventType, str], payload: dict) -> None:
         """Translate tree events to UI queue; enqueue copy_done for online-only."""
         normalized = self._normalize_event_type(type_)
+
+        if normalized == EventType.LOG:
+            level = str(payload.get("level", "")).lower()
+            message = str(payload.get("message", ""))
+            if level in ("error", "warning"):
+                self._append_error_log(level, message)
 
         if normalized == EventType.COPY_START:
             self.total_bytes += int(payload.get("size", 0) or 0)
