@@ -108,6 +108,20 @@ def _safe_scandir(path: str):
     if last_exc:
         raise last_exc
 
+def _path_variants(path: str) -> list[pathlib.Path]:
+    """
+    Return the plain path first, then the long-path variant if it differs.
+    Some providers (e.g., VMware shared folders) reject '\\\\?\\' prefixes,
+    so we try both when needed.
+    """
+    plain = pathlib.Path(path)
+    if os.name != "nt":
+        return [plain]
+    long_variant = pathlib.Path(_fs_path(path))
+    if long_variant == plain:
+        return [plain]
+    return [plain, long_variant]
+
 class NodeKind(Enum):
     FILE = "FILE"
     FOLDER = "FOLDER"
@@ -561,21 +575,36 @@ class Tree:
         dst_path = dst_root / rel
         dst_path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = dst_path.with_name(dst_path.name + f".tmp.{random_string(8)}")
-        size = size_hint or pathlib.Path(_fs_path(str(src_path))).stat().st_size
+        size = size_hint or 0
+        if size == 0:
+            size_exc: Optional[Exception] = None
+            for candidate in _path_variants(str(src_path)):
+                try:
+                    size = candidate.stat().st_size
+                    size_exc = None
+                    break
+                except OSError as exc:
+                    size_exc = exc
+                    continue
+            if size_exc:
+                raise size_exc
         rel_key = rel.as_posix()
 
-        src_fs = pathlib.Path(_fs_path(str(src_path)))
-        dst_fs = pathlib.Path(_fs_path(str(dst_path)))
-        tmp_fs = pathlib.Path(_fs_path(str(tmp_path)))
+        src_variants = _path_variants(str(src_path))
+        dst_variants = _path_variants(str(dst_path))
+        tmp_variants = _path_variants(str(tmp_path))
 
         self._emit(EventType.COPY_START, rel=rel_key, size=size, src=str(src_path), dst=str(dst_path))
         progress_step = max(size // 10, 1)  # coarse progress; fine-grained left to old layer if needed
         min_progress_interval = 0.2
 
-        try:
+        def _copy_once(src_fs: pathlib.Path, dst_fs: pathlib.Path, tmp_fs: pathlib.Path) -> None:
             bytes_done = 0
             last_progress_emit = 0
             last_progress_time = time.time()
+
+            dst_fs.parent.mkdir(parents=True, exist_ok=True)
+            tmp_fs.parent.mkdir(parents=True, exist_ok=True)
 
             with src_fs.open("rb") as f_src, tmp_fs.open("wb") as f_dst:
                 buffer = bytearray(1024 * 1024)
@@ -602,21 +631,33 @@ class Tree:
                 pass
 
             tmp_fs.replace(dst_fs)
-            file_node.metadata().status = Status.DONE
-            self.copied_bytes += size
-            self.copied_files += 1
-            self._emit(EventType.COPY_DONE, rel=rel_key, bytes_total=size)
-        except Exception as exc:  # noqa: BLE001
-            try:
-                if tmp_fs.exists():
-                    tmp_fs.unlink()
-            except Exception:
-                pass
-            self._emit(
-                EventType.LOG,
-                level="error",
-                message=f"Error copying {rel_key}: {exc!r} (src={src_fs}, dst={dst_fs}, tmp={tmp_fs})",
-            )
+
+        last_attempt: Optional[tuple[pathlib.Path, pathlib.Path, pathlib.Path]] = None
+        last_exc: Optional[Exception] = None
+        for src_fs in src_variants:
+            for dst_fs in dst_variants:
+                for tmp_fs in tmp_variants:
+                    try:
+                        _copy_once(src_fs, dst_fs, tmp_fs)
+                        file_node.metadata().status = Status.DONE
+                        self.copied_bytes += size
+                        self.copied_files += 1
+                        self._emit(EventType.COPY_DONE, rel=rel_key, bytes_total=size)
+                        return
+                    except Exception as exc:  # noqa: BLE001
+                        last_attempt = (src_fs, dst_fs, tmp_fs)
+                        last_exc = exc
+                        try:
+                            if tmp_fs.exists():
+                                tmp_fs.unlink()
+                        except Exception:
+                            pass
+
+        if last_exc:
+            details = ""
+            if last_attempt:
+                details = f" (src={last_attempt[0]}, dst={last_attempt[1]}, tmp={last_attempt[2]})"
+            self._emit(EventType.LOG, level="error", message=f"Error copying {rel_key}: {last_exc!r}{details}")
 
 
 # avoid allocating new objects
@@ -655,10 +696,20 @@ class File(Node):
 
     def copy(self, dst: pathlib.Path):
         dst.mkdir(exist_ok=True, parents=True)
-        src_fs = pathlib.Path(_fs_path(str(self._path)))
-        dst_fs = pathlib.Path(_fs_path(str(dst)))
-        shutil.copy(src_fs, dst_fs)
-        self._metadata.status = Status.DONE
+        src_variants = _path_variants(str(self._path))
+        dst_variants = _path_variants(str(dst))
+        last_exc: Optional[Exception] = None
+        for src_fs in src_variants:
+            for dst_fs in dst_variants:
+                try:
+                    shutil.copy(src_fs, dst_fs)
+                    self._metadata.status = Status.DONE
+                    return
+                except Exception as exc:
+                    last_exc = exc
+                    continue
+        if last_exc:
+            raise last_exc
 
     def metadata(self) -> Optional[_Metadata]:
         return self._metadata
